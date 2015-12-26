@@ -7,27 +7,46 @@ var express = require('express');
 var gm = require('gm');
 var validUrl = require('valid-url');
 var giphyApi = require('giphy-api');
+var winston = require('winston');
+var _ = require('lodash');
 
 var app = express();
 var giphy = giphyApi();
 
 var bowmeme = gm('dbow.png');
 
+var DEFAULT_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons' +
+                    '/3/3b/Windows_9X_BSOD.png';
+
+winston.add(winston.transports.File, { filename: 'bowmeme.log' });
+// winston.remove(winston.transports.Console);
+
+function error(err) {
+  winston.log('error', err.message);
+  return 'Something went horribly wrong!:' + err.message;
+}
 
 function getBaseImageUrl(req, res, next) {
   if (validUrl.isUri(req.query.u)) {
+    winston.log('info', req.query.u, { type: 'url' });
+
     req.baseImageUrl = req.query.u;
     return next();
   }
+
+  winston.log('info', req.query.u, { type: 'query' });
 
   giphy.search({
       q: req.query.u,
       limit: 1
   }, function(err, res) {
-    if (res.data.length) {
-      req.baseImageUrl = res.data[0].images.original.url;
+    if (err) {
+      return res.send(error(err));
+    }
+    if (res.data && res.data.length) {
+      req.baseImageUrl = _.get(res.data[0], 'images.original.url', DEFAULT_IMAGE);
     } else {
-      req.baseImageUrl = 'http://i.giphy.com/tpwwhv1BLd31e.gif';
+      req.baseImageUrl = DEFAULT_IMAGE;
     }
     next();
   });
@@ -45,8 +64,8 @@ function getImage(req, res, next) {
       next();
     });
   });
-  imageRequest.on('error', function(e) {
-    // TODO(dbow): Handle errors.
+  imageRequest.on('error', function(err) {
+    return res.send(error(err));
   });
   imageRequest.end();
 }
@@ -57,7 +76,7 @@ function composite(req, res, next) {
   gm(baseImage)
     .identify({bufferStream: true}, function (err, data) {
       if (err) {
-        return res.send('Something went horribly wrong!:' + err.message);
+        return res.send(error(err));
       }
 
       var self = this;
@@ -73,8 +92,14 @@ function composite(req, res, next) {
       bowmeme
         .resize(width, height)
         .write(resizedBowmeme, function(err) {
+          if (err) {
+            return res.send(error(err));
+          }
           gm(resizedBowmeme)
             .size(function(err, size) {
+              if (err) {
+                return res.send(error(err));
+              }
 
               var bWidth = size.width / 2;
               var bHeight = size.height / 2;
@@ -99,6 +124,9 @@ function composite(req, res, next) {
                 .out('-resize', [width, 'x', height].join(''))
                 .out('-draw', compositeString.join(''))
                 .toBuffer(function(err, buffer) {
+                  if (err) {
+                    return res.send(error(err));
+                  }
                   req.composite = buffer;
                   fs.unlink(resizedBowmeme);
                   fs.unlink(req.baseImage);
@@ -109,12 +137,23 @@ function composite(req, res, next) {
     });
 }
 
+app.get('/logs', function(req, res) {
+  winston.query({limit: 100}, function (err, results) {
+    if (err) {
+      return res.send(err.message);
+    }
+    console.log(results);
+    res.setHeader('content-type', 'application/json');
+    res.send(results);
+  });
+});
+
 app.get('/', getBaseImageUrl, getImage, composite, function(req, res) {
   res.setHeader('content-type', 'image/' + (req.format || 'png'));
   res.end(req.composite);
 });
 
-var server = app.listen(3000, function () {
+var server = app.listen(process.env.PORT || 3000, function () {
   var host = server.address().address;
   var port = server.address().port;
 
