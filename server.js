@@ -26,6 +26,23 @@ function error(err) {
   return 'Something went horribly wrong!:' + err.message;
 }
 
+function clean(base, temp) {
+  if (base) {
+    try {
+      fs.unlink(base);
+    } catch(e) {
+      winston.log('error', e.message || e);
+    }
+  }
+  if (temp) {
+    try {
+      fs.unlink(temp);
+    } catch(e) {
+      winston.log('error', e.message || e);
+    }
+  }
+}
+
 function getBaseImageUrl(req, res, next) {
   if (validUrl.isUri(req.query.u)) {
     winston.log('info', req.query.u, { type: 'url' });
@@ -55,8 +72,8 @@ function getBaseImageUrl(req, res, next) {
 function getImage(req, res, next) {
   var imageUrl = url.parse(req.baseImageUrl);
   var request = imageUrl.protocol === 'https:' ? https.request : http.request;
+  var baseImage = 'base_' + Math.random();
   var imageRequest = request(imageUrl, function(imageResponse) {
-    var baseImage = 'base_' + Math.random();
     var stream = fs.createWriteStream(baseImage);
     imageResponse.pipe(stream);
     imageResponse.on('end', function() {
@@ -65,6 +82,7 @@ function getImage(req, res, next) {
     });
   });
   imageRequest.on('error', function(err) {
+    clean(baseImage);
     return res.send(error(err));
   });
   imageRequest.end();
@@ -76,6 +94,7 @@ function composite(req, res, next) {
   gm(baseImage)
     .identify({bufferStream: true}, function (err, data) {
       if (err) {
+        clean(req.baseImage);
         return res.send(error(err));
       }
 
@@ -93,11 +112,13 @@ function composite(req, res, next) {
         .resize(width, height)
         .write(resizedBowmeme, function(err) {
           if (err) {
+            clean(req.baseImage, resizedBowmeme);
             return res.send(error(err));
           }
           gm(resizedBowmeme)
             .size(function(err, size) {
               if (err) {
+                clean(req.baseImage, resizedBowmeme);
                 return res.send(error(err));
               }
 
@@ -124,12 +145,11 @@ function composite(req, res, next) {
                 .out('-resize', [width, 'x', height].join(''))
                 .out('-draw', compositeString.join(''))
                 .toBuffer(function(err, buffer) {
+                  clean(req.baseImage, resizedBowmeme);
                   if (err) {
                     return res.send(error(err));
                   }
                   req.composite = buffer;
-                  fs.unlink(resizedBowmeme);
-                  fs.unlink(req.baseImage);
                   next();
                 });
             });
