@@ -142,7 +142,6 @@ app.get('/logs', function(req, res) {
     if (err) {
       return res.send(err.message);
     }
-    console.log(results);
     res.setHeader('content-type', 'application/json');
     res.send(results);
   });
