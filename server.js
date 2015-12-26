@@ -138,7 +138,12 @@ function composite(req, res, next) {
 }
 
 app.get('/logs', function(req, res) {
-  winston.query({limit: 100}, function (err, results) {
+  var options = {
+    start: req.query.start || 0,
+    limit: req.query.limit || 50,
+    order: 'desc'
+  };
+  winston.query(options, function (err, results) {
     if (err) {
       return res.send(err.message);
     }
