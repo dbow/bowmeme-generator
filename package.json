@@ -19,6 +19,8 @@
   "homepage": "https://github.com/dbow/bowmeme-generator#readme",
   "dependencies": {
     "express": "^4.13.3",
-    "gm": "^1.21.1"
+    "giphy-api": "^1.1.11",
+    "gm": "^1.21.1",
+    "valid-url": "^1.0.9"
   }
 }
