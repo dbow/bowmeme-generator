@@ -19,7 +19,7 @@ var DEFAULT_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons' +
                     '/3/3b/Windows_9X_BSOD.png';
 
 winston.add(winston.transports.File, { filename: 'bowmeme.log' });
-// winston.remove(winston.transports.Console);
+winston.remove(winston.transports.Console);
 
 function error(err) {
   winston.log('error', err.message);
