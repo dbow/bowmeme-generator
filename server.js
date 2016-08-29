@@ -19,7 +19,7 @@ var bowmeme = gm(path.join(__dirname, 'dbow.png'));
 var DEFAULT_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons' +
                     '/3/3b/Windows_9X_BSOD.png';
 
-winston.add(winston.transports.File, { filename: 'bowmeme.log' });
+winston.add(winston.transports.File, { filename: path.join(__dirname, 'bowmeme.log') });
 winston.remove(winston.transports.Console);
 
 function error(err) {
@@ -73,7 +73,7 @@ function getBaseImageUrl(req, res, next) {
 function getImage(req, res, next) {
   var imageUrl = url.parse(req.baseImageUrl);
   var request = imageUrl.protocol === 'https:' ? https.request : http.request;
-  var baseImage = 'base_' + Math.random();
+  var baseImage = path.join(__dirname, 'base_' + Math.random());
   var imageRequest = request(imageUrl, function(imageResponse) {
     var stream = fs.createWriteStream(baseImage);
     imageResponse.pipe(stream);
@@ -106,7 +106,7 @@ function composite(req, res, next) {
 
       req.format = data.format;
 
-      var resizedBowmeme = 'temp_' + Math.random();
+      var resizedBowmeme = path.join(__dirname, 'temp_' + Math.random());
 
       // Resize bowmeme to fit baseImage.
       bowmeme
