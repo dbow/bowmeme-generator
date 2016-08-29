@@ -2,6 +2,7 @@ var fs = require('fs');
 var http = require('http');
 var https = require('https');
 var url = require('url');
+var path = require('path');
 
 var express = require('express');
 var gm = require('gm');
@@ -13,7 +14,7 @@ var _ = require('lodash');
 var app = express();
 var giphy = giphyApi();
 
-var bowmeme = gm('dbow.png');
+var bowmeme = gm(path.join(__dirname, 'dbow.png'));
 
 var DEFAULT_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons' +
                     '/3/3b/Windows_9X_BSOD.png';
