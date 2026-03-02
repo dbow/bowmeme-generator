@@ -1,187 +1,131 @@
-var fs = require('fs');
-var http = require('http');
-var https = require('https');
-var url = require('url');
-var path = require('path');
+'use strict';
 
-var express = require('express');
-var gm = require('gm');
-var validUrl = require('valid-url');
-var giphyApi = require('giphy-api');
-var winston = require('winston');
-var _ = require('lodash');
+require('dotenv').config();
 
-var app = express();
-var giphy = giphyApi();
+const fs = require('fs');
+const path = require('path');
 
-var bowmeme = gm(path.join(__dirname, 'dbow.png'));
+const express = require('express');
+const sharp = require('sharp');
+const { createLogger, format, transports } = require('winston');
 
-var DEFAULT_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons' +
-                    '/3/3b/Windows_9X_BSOD.png';
+const DBOW_IMAGE = path.join(__dirname, 'dbow.png');
+const LOG_FILE = path.join(__dirname, 'bowmeme.log');
+const DEFAULT_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons/3/3b/Windows_9X_BSOD.png';
+const GIPHY_API_KEY = process.env.GIPHY_API_KEY;
 
-winston.add(winston.transports.File, { filename: path.join(__dirname, 'bowmeme.log') });
-winston.remove(winston.transports.Console);
+const logger = createLogger({
+  format: format.combine(format.timestamp(), format.json()),
+  transports: [new transports.File({ filename: LOG_FILE })],
+});
 
-function error(err) {
-  winston.log('error', err.message);
-  return 'Something went horribly wrong!:' + err.message;
-}
+const app = express();
 
-function clean(base, temp) {
-  if (base) {
-    try {
-      fs.unlink(base);
-    } catch(e) {
-      winston.log('error', e.message || e);
-    }
-  }
-  if (temp) {
-    try {
-      fs.unlink(temp);
-    } catch(e) {
-      winston.log('error', e.message || e);
-    }
+function isValidUrl(str) {
+  try {
+    new URL(str);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-function getBaseImageUrl(req, res, next) {
-  if (validUrl.isUri(req.query.u)) {
-    winston.log('info', req.query.u, { type: 'url' });
+async function getBaseImageUrl(req, res, next) {
+  const query = req.query.u;
 
-    req.baseImageUrl = req.query.u;
+  if (isValidUrl(query)) {
+    logger.info(query, { type: 'url' });
+    req.baseImageUrl = query;
     return next();
   }
 
-  winston.log('info', req.query.u, { type: 'query' });
+  logger.info(query, { type: 'query' });
 
-  giphy.search({
-      q: req.query.u,
-      limit: 1
-  }, function(err, res) {
-    if (err) {
-      return res.send(error(err));
-    }
-    if (res.data && res.data.length) {
-      req.baseImageUrl = _.get(res.data[0], 'images.original.url', DEFAULT_IMAGE);
-    } else {
-      req.baseImageUrl = DEFAULT_IMAGE;
-    }
+  try {
+    if (!GIPHY_API_KEY) throw new Error('GIPHY_API_KEY environment variable is not set');
+    const apiUrl = `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_API_KEY}&q=${encodeURIComponent(query)}&limit=1`;
+    const response = await fetch(apiUrl);
+    if (!response.ok) throw new Error(`Giphy API error: ${response.statusText}`);
+    const data = await response.json();
+    req.baseImageUrl = data.data?.[0]?.images?.original?.url ?? DEFAULT_IMAGE;
+  } catch (err) {
+    logger.error(err.message);
+    req.baseImageUrl = DEFAULT_IMAGE;
+  }
+
+  next();
+}
+
+async function getImage(req, res, next) {
+  try {
+    const response = await fetch(req.baseImageUrl);
+    if (!response.ok) throw new Error(`Image fetch failed: ${response.statusText}`);
+    req.baseImageBuffer = Buffer.from(await response.arrayBuffer());
     next();
-  });
+  } catch (err) {
+    logger.error(err.message);
+    res.status(500).send('Something went horribly wrong!: ' + err.message);
+  }
 }
 
-function getImage(req, res, next) {
-  var imageUrl = url.parse(req.baseImageUrl);
-  var request = imageUrl.protocol === 'https:' ? https.request : http.request;
-  var baseImage = path.join(__dirname, 'base_' + Math.random());
-  var imageRequest = request(imageUrl, function(imageResponse) {
-    var stream = fs.createWriteStream(baseImage);
-    imageResponse.pipe(stream);
-    imageResponse.on('end', function() {
-      req.baseImage = baseImage;
-      next();
-    });
-  });
-  imageRequest.on('error', function(err) {
-    clean(baseImage);
-    return res.send(error(err));
-  });
-  imageRequest.end();
+async function composite(req, res, next) {
+  try {
+    const base = sharp(req.baseImageBuffer, { animated: true });
+    const { width, format, pages, pageHeight } = await base.metadata();
+
+    req.format = format;
+
+    // pageHeight is the per-frame height for animated images; for static images
+    // it's undefined so we fall back to the full image height.
+    const frameHeight = pageHeight ?? (await base.metadata()).height;
+    const numFrames = pages ?? 1;
+
+    // Resize bowmeme to fit the bottom-right quadrant of a single frame.
+    const overlayBuf = await sharp(DBOW_IMAGE)
+      .resize(Math.round(width / 2), Math.round(frameHeight / 2), { fit: 'inside' })
+      .toBuffer();
+
+    const { width: oWidth, height: oHeight } = await sharp(overlayBuf).metadata();
+
+    // Composite the overlay into the bottom-right corner of every frame.
+    // Each frame is offset by (i * frameHeight) in the stacked canvas.
+    const compositeInputs = Array.from({ length: numFrames }, (_, i) => ({
+      input: overlayBuf,
+      left: width - oWidth,
+      top: i * frameHeight + (frameHeight - oHeight),
+      blend: 'over',
+    }));
+
+    req.composite = await base
+      .composite(compositeInputs)
+      .toBuffer();
+
+    next();
+  } catch (err) {
+    logger.error(err.message);
+    res.status(500).send('Something went horribly wrong!: ' + err.message);
+  }
 }
 
-function composite(req, res, next) {
-  var baseImage = fs.createReadStream(req.baseImage);
-
-  gm(baseImage)
-    .identify({bufferStream: true}, function (err, data) {
-      if (err) {
-        clean(req.baseImage);
-        return res.send(error(err));
-      }
-
-      var self = this;
-
-      var width = data.size.width;
-      var height = data.size.height;
-
-      req.format = data.format;
-
-      var resizedBowmeme = path.join(__dirname, 'temp_' + Math.random());
-
-      // Resize bowmeme to fit baseImage.
-      bowmeme
-        .resize(width, height)
-        .write(resizedBowmeme, function(err) {
-          if (err) {
-            clean(req.baseImage, resizedBowmeme);
-            return res.send(error(err));
-          }
-          gm(resizedBowmeme)
-            .size(function(err, size) {
-              if (err) {
-                clean(req.baseImage, resizedBowmeme);
-                return res.send(error(err));
-              }
-
-              var bWidth = size.width / 2;
-              var bHeight = size.height / 2;
-
-              var compositeString = [
-                'image over ',
-                width - bWidth,
-                ',',
-                height - bHeight,
-                ' ',
-                bWidth,
-                ',',
-                bHeight,
-                ' ',
-                resizedBowmeme
-              ];
-
-              // Composite resized bowmeme
-              self
-                .command('convert')
-                .in('-coalesce')
-                .out('-resize', [width, 'x', height].join(''))
-                .out('-draw', compositeString.join(''))
-                .toBuffer(function(err, buffer) {
-                  clean(req.baseImage, resizedBowmeme);
-                  if (err) {
-                    return res.send(error(err));
-                  }
-                  req.composite = buffer;
-                  next();
-                });
-            });
-        });
-    });
-}
-
-app.get('/logs', function(req, res) {
-  var options = {
-    start: req.query.start || 0,
-    limit: req.query.limit || 50,
-    order: 'desc'
-  };
-  winston.query(options, function (err, results) {
-    if (err) {
-      return res.send(err.message);
-    }
-    res.setHeader('content-type', 'application/json');
-    res.send(results);
-  });
+app.get('/logs', async (req, res) => {
+  try {
+    const content = await fs.promises.readFile(LOG_FILE, 'utf8');
+    const start = parseInt(req.query.start) || 0;
+    const limit = parseInt(req.query.limit) || 50;
+    const lines = content.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+    res.json(lines.reverse().slice(start, start + limit));
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
 });
 
-app.get('/', getBaseImageUrl, getImage, composite, function(req, res) {
-  res.setHeader('content-type', 'image/' + (req.format || 'png'));
+app.get('/', getBaseImageUrl, getImage, composite, (req, res) => {
+  res.setHeader('content-type', `image/${(req.format || 'png').toLowerCase()}`);
   res.end(req.composite);
 });
 
-var server = app.listen(process.env.PORT || 3001, function () {
-  var host = server.address().address;
-  var port = server.address().port;
-
-  console.log('Example app listening at http://%s:%s', host, port);
+const PORT = process.env.PORT || 3001;
+const server = app.listen(PORT, () => {
+  const { address, port } = server.address();
+  console.log(`Bowmeme generator listening at http://${address}:${port}`);
 });
-

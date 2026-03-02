@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: bowmeme-generator
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: GIPHY_API_KEY
+        sync: false
