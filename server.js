@@ -33,6 +33,11 @@ function isValidUrl(str) {
 async function getBaseImageUrl(req, res, next) {
   const query = req.query.u;
 
+  if (!query) {
+    req.baseImageUrl = DEFAULT_IMAGE;
+    return next();
+  }
+
   if (isValidUrl(query)) {
     logger.info(query, { type: 'url' });
     req.baseImageUrl = query;
