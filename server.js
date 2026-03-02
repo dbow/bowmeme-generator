@@ -88,13 +88,20 @@ async function getImage(req, res, next) {
 async function composite(req, res, next) {
   const t = Date.now();
   try {
-    // Cap frames: sharp's `pages` option limits how many frames are decoded.
-    const base = sharp(req.baseImageBuffer, { pages: MAX_FRAMES });
-    const { width, height, format, pages, pageHeight } = await base.metadata();
+    // Read metadata first to check frame count and dimensions.
+    let base = sharp(req.baseImageBuffer, { animated: true });
+    const { width, height, format, pages: totalPages, pageHeight } = await base.metadata();
 
     req.format = format;
     const frameHeight = pageHeight ?? height;
-    const numFrames = pages ?? 1;
+    const numFrames = Math.min(totalPages ?? 1, MAX_FRAMES);
+
+    // If the image exceeds the frame cap, re-read with the limit applied.
+    // Only multi-page formats support the `pages` option — static images
+    // (PNG, JPEG etc.) work fine with { animated: true } above.
+    if (numFrames < (totalPages ?? 1)) {
+      base = sharp(req.baseImageBuffer, { pages: numFrames });
+    }
 
     // Scale down if either dimension exceeds MAX_DIMENSION.
     const scale = Math.min(1, MAX_DIMENSION / width, MAX_DIMENSION / frameHeight);
