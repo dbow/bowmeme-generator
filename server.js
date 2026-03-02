@@ -14,9 +14,15 @@ const LOG_FILE = path.join(__dirname, 'bowmeme.log');
 const DEFAULT_IMAGE = 'https://upload.wikimedia.org/wikipedia/commons/3/3b/Windows_9X_BSOD.png';
 const GIPHY_API_KEY = process.env.GIPHY_API_KEY;
 
+const MAX_FRAMES = 50;
+const MAX_DIMENSION = 480;
+
 const logger = createLogger({
   format: format.combine(format.timestamp(), format.json()),
-  transports: [new transports.File({ filename: LOG_FILE })],
+  transports: [
+    new transports.File({ filename: LOG_FILE }),
+    new transports.Console({ format: format.combine(format.colorize(), format.simple()) }),
+  ],
 });
 
 const app = express();
@@ -32,6 +38,7 @@ function isValidUrl(str) {
 
 async function getBaseImageUrl(req, res, next) {
   const query = req.query.u;
+  req.startTime = Date.now();
 
   if (!query) {
     req.baseImageUrl = DEFAULT_IMAGE;
@@ -39,12 +46,13 @@ async function getBaseImageUrl(req, res, next) {
   }
 
   if (isValidUrl(query)) {
-    logger.info(query, { type: 'url' });
+    logger.info(`[getBaseImageUrl] direct URL: ${query}`);
     req.baseImageUrl = query;
     return next();
   }
 
-  logger.info(query, { type: 'query' });
+  logger.info(`[getBaseImageUrl] Giphy search: "${query}"`);
+  const t = Date.now();
 
   try {
     if (!GIPHY_API_KEY) throw new Error('GIPHY_API_KEY environment variable is not set');
@@ -53,8 +61,9 @@ async function getBaseImageUrl(req, res, next) {
     if (!response.ok) throw new Error(`Giphy API error: ${response.statusText}`);
     const data = await response.json();
     req.baseImageUrl = data.data?.[0]?.images?.original?.url ?? DEFAULT_IMAGE;
+    logger.info(`[getBaseImageUrl] Giphy search done in ${Date.now() - t}ms → ${req.baseImageUrl}`);
   } catch (err) {
-    logger.error(err.message);
+    logger.error(`[getBaseImageUrl] Giphy search failed after ${Date.now() - t}ms: ${err.message}`);
     req.baseImageUrl = DEFAULT_IMAGE;
   }
 
@@ -62,52 +71,64 @@ async function getBaseImageUrl(req, res, next) {
 }
 
 async function getImage(req, res, next) {
+  logger.info(`[getImage] fetching: ${req.baseImageUrl}`);
+  const t = Date.now();
   try {
     const response = await fetch(req.baseImageUrl);
     if (!response.ok) throw new Error(`Image fetch failed: ${response.statusText}`);
     req.baseImageBuffer = Buffer.from(await response.arrayBuffer());
+    logger.info(`[getImage] done in ${Date.now() - t}ms (${req.baseImageBuffer.length} bytes)`);
     next();
   } catch (err) {
-    logger.error(err.message);
+    logger.error(`[getImage] failed after ${Date.now() - t}ms: ${err.message}`);
     res.status(500).send('Something went horribly wrong!: ' + err.message);
   }
 }
 
 async function composite(req, res, next) {
+  const t = Date.now();
   try {
-    const base = sharp(req.baseImageBuffer, { animated: true });
-    const { width, format, pages, pageHeight } = await base.metadata();
+    // Cap frames: sharp's `pages` option limits how many frames are decoded.
+    const base = sharp(req.baseImageBuffer, { pages: MAX_FRAMES });
+    const { width, height, format, pages, pageHeight } = await base.metadata();
 
     req.format = format;
-
-    // pageHeight is the per-frame height for animated images; for static images
-    // it's undefined so we fall back to the full image height.
-    const frameHeight = pageHeight ?? (await base.metadata()).height;
+    const frameHeight = pageHeight ?? height;
     const numFrames = pages ?? 1;
 
-    // Resize bowmeme to fit the bottom-right quadrant of a single frame.
+    // Scale down if either dimension exceeds MAX_DIMENSION.
+    const scale = Math.min(1, MAX_DIMENSION / width, MAX_DIMENSION / frameHeight);
+    const scaledWidth = Math.round(width * scale);
+    const scaledFrameHeight = Math.round(frameHeight * scale);
+
+    const pipeline = scale < 1
+      ? base.resize(scaledWidth, scaledFrameHeight, { fit: 'inside' })
+      : base;
+
+    // Resize overlay to fit the bottom-right quadrant of a single frame.
     const overlayBuf = await sharp(DBOW_IMAGE)
-      .resize(Math.round(width / 2), Math.round(frameHeight / 2), { fit: 'inside' })
+      .resize(Math.round(scaledWidth / 2), Math.round(scaledFrameHeight / 2), { fit: 'inside' })
       .toBuffer();
 
     const { width: oWidth, height: oHeight } = await sharp(overlayBuf).metadata();
 
     // Composite the overlay into the bottom-right corner of every frame.
-    // Each frame is offset by (i * frameHeight) in the stacked canvas.
+    // Each frame is offset by (i * scaledFrameHeight) in the stacked canvas.
     const compositeInputs = Array.from({ length: numFrames }, (_, i) => ({
       input: overlayBuf,
-      left: width - oWidth,
-      top: i * frameHeight + (frameHeight - oHeight),
+      left: scaledWidth - oWidth,
+      top: i * scaledFrameHeight + (scaledFrameHeight - oHeight),
       blend: 'over',
     }));
 
-    req.composite = await base
+    req.composite = await pipeline
       .composite(compositeInputs)
       .toBuffer();
 
+    logger.info(`[composite] done in ${Date.now() - t}ms (${numFrames} frame(s), ${scaledWidth}x${scaledFrameHeight}px, format: ${format})`);
     next();
   } catch (err) {
-    logger.error(err.message);
+    logger.error(`[composite] failed after ${Date.now() - t}ms: ${err.message}`);
     res.status(500).send('Something went horribly wrong!: ' + err.message);
   }
 }
@@ -127,6 +148,7 @@ app.get('/logs', async (req, res) => {
 });
 
 app.get('/', getBaseImageUrl, getImage, composite, (req, res) => {
+  logger.info(`[request] total time: ${Date.now() - req.startTime}ms`);
   res.setHeader('content-type', `image/${(req.format || 'png').toLowerCase()}`);
   res.end(req.composite);
 });
