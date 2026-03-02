@@ -107,6 +107,8 @@ async function composite(req, res, next) {
   }
 }
 
+app.get('/health', (req, res) => res.sendStatus(200));
+
 app.get('/logs', async (req, res) => {
   try {
     const content = await fs.promises.readFile(LOG_FILE, 'utf8');
